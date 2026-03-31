@@ -1,0 +1,27 @@
+- name: reference_intrinsics
+  parameters:
+    prior_intrinsics: True
+    prior_extrinsics: False
+    estimated_intrinsics: True
+    estimated_extrinsics: True
+
+- name: reference_extrinsics
+  parameters:
+    prior_intrinsics: False
+    prior_extrinsics: True
+    estimated_intrinsics: True
+    estimated_extrinsics: True
+
+- name: estimated
+  parameters:
+    prior_intrinsics: False
+    prior_extrinsics: False
+    estimated_intrinsics: True
+    estimated_extrinsics: True
+
+- name: reference
+  parameters:
+    prior_intrinsics: True
+    prior_extrinsics: True
+    estimated_intrinsics: True
+    estimated_extrinsics: True
