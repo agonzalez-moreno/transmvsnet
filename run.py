@@ -194,10 +194,10 @@ def run(parameter_set_file="", dataset_dir="", results_dir=""):
     torch.set_num_threads(10)
 
     # Load and preprocess example images (replace with your own image paths)
-    image_paths = absolute_file_paths(dataset_dir + "/input/images")
+    image_paths = absolute_file_paths(dataset_dir + "/images")
 
     # Load and preprocess example images (replace with your own image paths)
-    image_names = file_names(dataset_dir + "/input/images")
+    image_names = file_names(dataset_dir + "/images")
 
     reference_intrinsics_list = []
     reference_extrinsics_list = []
@@ -210,18 +210,16 @@ def run(parameter_set_file="", dataset_dir="", results_dir=""):
     for image_path in image_paths:
         # Read reference intrinsics
         reference_intrinsics = read_yaml_calib(
-            dataset_dir
-            + f"/reference/Lvl-0/camera_intrinsics/{image_names[image_idx]}.yaml"
+            dataset_dir + f"/camera_intrinsics/{image_names[image_idx]}.yaml"
         )
         reference_intrinsics_list.append(reference_intrinsics.astype(np.float64))
 
         # Read reference extrinsics
         reference_extrinsics_micmac = read_yaml_pose(
-            f"{dataset_dir}/reference/Lvl-0/camera_extrinsics/{image_names[image_idx]}.yaml"
+            f"{dataset_dir}/camera_extrinsics/{image_names[image_idx]}.yaml"
         )
 
         reference_extrinsics = reference_extrinsics_micmac
-        # reference_extrinsics = extrinsics_micmac_to_colmap(reference_extrinsics_micmac)
 
         reference_extrinsics = np.append(reference_extrinsics, [[0, 0, 0, 1]], axis=0)
         if image_idx == 0:
@@ -236,17 +234,16 @@ def run(parameter_set_file="", dataset_dir="", results_dir=""):
         reference_extrinsics[2][3] = (
             reference_extrinsics[2][3] - origin_extrinsics[2][3]
         )
+
+        # Change extrinsics to world_to_cam
+        reference_extrinsics = np.linalg.inv(reference_extrinsics)
         reference_extrinsics_list.append(reference_extrinsics.astype(np.float64))
 
         image_idx = image_idx + 1
 
         # Add image to array
         #
-        image = cv2.resize(
-            np.array(Image.open(image_path)),
-            (512, 352),
-            interpolation=cv2.INTER_NEAREST,
-        )
+        image = Image.open(image_path)
         image = torchvision.transforms.ToTensor()(image)
         images.append(image)
 
@@ -265,37 +262,48 @@ def run(parameter_set_file="", dataset_dir="", results_dir=""):
         torch_projection = torch.stack((torch_extrinsics, torch_intrinsics))
         torch_projection_tensor_array.append(torch_projection)
 
-        depth_min = 1000
-        depths_vec = []
-        ndepths = 200
-        interval_scale = 1.004
-        for i in range(ndepths):
-            depths_vec.append(depth_min * pow(interval_scale, i))
-        print(depths_vec)
-        torch_depth_tensor = torch.tensor([depths_vec])
+        torch_depth_tensor = torch.tensor([np.linspace(1350, 1450, num=2000)])
         torch_depth_tensor_array.append(torch_depth_tensor)
 
         print(torch_projection.size())
+
+    print("torch_projection_tensor_array")
+    print(torch_projection_tensor_array)
+
     torch_projections_tensor = (
         torch.stack(torch_projection_tensor_array)
         .reshape([1, 4, 2, 4, 4])
         .type(torch.float64)
     )
 
-    stage2_pjmats = torch_projections_tensor
-    stage2_pjmats[:, 1, :2, :] = torch_projections_tensor[:, 1, :2, :] * 2
-    stage3_pjmats = torch_projections_tensor
-    stage3_pjmats[:, 1, :2, :] = torch_projections_tensor[:, 1, :2, :] * 4
+    print("torch_projections_tensor")
+    print(torch_projections_tensor)
+
+    stage2_pjmats = (
+        torch.stack(torch_projection_tensor_array.copy())
+        .reshape([1, 4, 2, 4, 4])
+        .type(torch.float64)
+    )
+    stage2_pjmats[:, :, 1, :2, :] = torch_projections_tensor[:, :, 1, :2, :] / 2.0
+
+    stage3_pjmats = (
+        torch.stack(torch_projection_tensor_array.copy())
+        .reshape([1, 4, 2, 4, 4])
+        .type(torch.float64)
+    )
+    stage3_pjmats[:, :, 1, :2, :] = torch_projections_tensor[:, :, 1, :2, :] / 4.0
 
     proj_matrices_ms = {
-        "stage1": torch_projections_tensor,
+        "stage1": stage3_pjmats,
         "stage2": stage2_pjmats,
-        "stage3": stage3_pjmats,
+        "stage3": torch_projections_tensor,
     }
+
+    print(proj_matrices_ms)
 
     torch_depths_tensor = torch.stack(torch_depth_tensor_array)
 
-    images = np.array(images).reshape([1, 4, 3, 352, 512])
+    images = np.array(images).reshape([1, 4, 3, 832, 1312])
     print(images.shape)
     images = torch.tensor(images)
     print(images.size())
@@ -304,23 +312,22 @@ def run(parameter_set_file="", dataset_dir="", results_dir=""):
     model = TransMVSNet(
         refine=False,
         ndepths=[48, 32, 8],
-        depth_interals_ratio=[4, 2, 1],
+        depth_interals_ratio=[4.0, 2.0, 1.0],
         cr_base_chs=[8, 8, 8],
     )
 
     # load checkpoint file specified by args.loadckpt
     state_dict = torch.load(
-        "/home/AGonzalez-Admin/work/IGN/local/4_estimation/methods/transmvsnet/checkpoints/model.ckpt",
+        "/home/AGonzalez-Admin/work/IGN/local/4_estimation/methods/transmvsnet/checkpoints/model_dtu.ckpt",
         map_location=torch.device("cpu"),
     )
     model.load_state_dict(state_dict["model"], strict=False)
-    model = torch.nn.DataParallel(model)
+    # model = torch.nn.DataParallel(model)
 
     model.eval()
 
     print(len(images))
     print(torch_projections_tensor.size())
-    print(torch_depth_tensor.shape)
 
     with torch.no_grad():
         predictions = model(images, proj_matrices_ms, torch_depth_tensor)
@@ -341,10 +348,10 @@ def run(parameter_set_file="", dataset_dir="", results_dir=""):
 
     for camera_idx in range(predictions["depth"].shape[0]):
         # Save depth to a TIFF file
-        depth_image = predictions["stage3"]["depth"][camera_idx].cpu()
+        depth_image = predictions["depth"][camera_idx].cpu()
 
         tif = TIFF.open(
-            f"{results_dir}/Lvl-0/depth_images/{image_names[(camera_idx)]}.tif",
+            f"{results_dir}/depth_images/data/{image_names[(camera_idx)]}.tif",
             mode="w",
         )
         tif.write_image(depth_image)
@@ -352,22 +359,10 @@ def run(parameter_set_file="", dataset_dir="", results_dir=""):
         # Save depth confidence to a TIFF file
         depth_confidence_image = predictions["photometric_confidence"][camera_idx].cpu()
         tif = TIFF.open(
-            f"{results_dir}/Lvl-0/depth_images_confidence/{image_names[(camera_idx)]}.tif",
+            f"{results_dir}/depth_images/confidence/{image_names[(camera_idx)]}.tif",
             mode="w",
         )
         tif.write_image(depth_confidence_image)
-
-        # Write estimated intrinsics
-        write_instrinsics_yaml(
-            f"{results_dir}/Lvl-0/camera_intrinsics/{image_names[(camera_idx)]}.yaml",
-            reference_intrinsics_list[camera_idx],
-        )
-
-        # Write estimated extrinsics
-        write_extrinsics_yaml(
-            f"{results_dir}/Lvl-0/camera_poses/{image_names[(camera_idx)]}.yaml",
-            reference_extrinsics_list[camera_idx],
-        )
 
 
 import sys
